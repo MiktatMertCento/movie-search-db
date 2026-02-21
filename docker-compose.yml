@@ -1,0 +1,69 @@
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: movie-search-db
+    restart: always
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_DB=movie_ai
+      - POSTGRES_USER=root
+      - POSTGRES_PASSWORD=randompassword*2026.0
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U root -d movie_ai"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  setup:
+    image: golang:1.26-alpine
+    container_name: movie-setup
+    working_dir: /app
+    volumes:
+      - .:/app
+    environment:
+      - DB_HOST=db
+      - DB_PORT=5432
+      - DB_USER=root
+      - DB_PASSWORD=randompassword*2026.0
+      - DB_NAME=movie_ai
+      - DB_SSLMODE=disable
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+      - TMDB_API_KEY=e5aff83cba4c85311d5a39c070e5178a
+    depends_on:
+      db:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "./init-db.sh"]
+
+  backend:
+    build: .
+    container_name: movie-backend
+    restart: always
+    ports:
+      - "8080:8080"
+    depends_on:
+      setup:
+        condition: service_completed_successfully
+    environment:
+      - DB_HOST=db
+      - DB_PORT=5432
+      - DB_USER=root
+      - DB_PASSWORD=randompassword*2026.0
+      - DB_NAME=movie_ai
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  frontend:
+    build: ./frontend
+    container_name: movie-frontend
+    restart: always
+    ports:
+      - "3000:80"
+    depends_on:
+      backend:
+        condition: service_started
+
+volumes:
+  postgres_data:
