@@ -31,6 +31,7 @@ type MovieJob struct {
 	Keywords   string
 	Cast       string
 	Year       string
+	VoteAvg    float64 // IMDB Puanı için eklendi
 }
 
 func init() {
@@ -55,17 +56,18 @@ func main() {
 		}
 	}(db)
 
+	// Sorguya vote_average eklendi
 	query := `
-		SELECT id, title, COALESCE(title_tr, '') as title_tr, 
-		       tagline, COALESCE(tagline_tr, '') as tagline_tr, 
-		       overview, COALESCE(overview_tr, '') as overview_tr, 
-		       director, release_date,
-		COALESCE((SELECT string_agg(val->>'name', ', ') FROM jsonb_array_elements(CASE WHEN jsonb_typeof(genres) = 'array' THEN genres ELSE '[]'::jsonb END) val), '') as genres_list,
-		COALESCE((SELECT string_agg(elem, ', ') FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof(keywords) = 'array' THEN keywords ELSE '[]'::jsonb END) elem), '') as keywords_list,
-		COALESCE((SELECT string_agg(elem, ', ') FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof(cast_list) = 'array' THEN cast_list ELSE '[]'::jsonb END) elem), '') as cast_list_text
-		FROM movies 
-		WHERE embedding IS NULL AND overview_tr IS NOT NULL
-	`
+       SELECT id, title, COALESCE(title_tr, '') as title_tr, 
+              tagline, COALESCE(tagline_tr, '') as tagline_tr, 
+              overview, COALESCE(overview_tr, '') as overview_tr, 
+              director, release_date, vote_average,
+       COALESCE((SELECT string_agg(val->>'name', ', ') FROM jsonb_array_elements(CASE WHEN jsonb_typeof(genres) = 'array' THEN genres ELSE '[]'::jsonb END) val), '') as genres_list,
+       COALESCE((SELECT string_agg(elem, ', ') FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof(keywords) = 'array' THEN keywords ELSE '[]'::jsonb END) elem), '') as keywords_list,
+       COALESCE((SELECT string_agg(elem, ', ') FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof(cast_list) = 'array' THEN cast_list ELSE '[]'::jsonb END) elem), '') as cast_list_text
+       FROM movies 
+       WHERE embedding IS NULL AND overview_tr IS NOT NULL
+    `
 
 	rows, err := db.Query(query)
 	if err != nil {
@@ -87,12 +89,19 @@ func main() {
 			defer wg.Done()
 			client := &http.Client{Timeout: 60 * time.Second}
 			for j := range jobs {
+				// SAYISAL VERİLERİ ANLAMSAL METNE DÖNÜŞTÜRME
+				// Hem İngilizce hem Türkçe terimlerle modeli besliyoruz
 				combinedText := fmt.Sprintf(
 					"Represent this movie for retrieval: "+
-						"Titles: [EN: %s | TR: %s]. Year: %s. Director: %s. "+
-						"Metadata: {Genres: %s. Keywords: %s. Cast: %s}. "+
+						"Titles: [EN: %s | TR: %s]. "+
+						"Rating: %.1f/10. IMDB Score: %.1f. Release Year: %s. "+ // EN Sayısal Bağlam
+						"IMDB Puanı: %.1f/10. Çıkış Yılı: %s. "+ // TR Sayısal Bağlam
+						"Director: %s. Metadata: {Genres: %s. Keywords: %s. Cast: %s}. "+
 						"EN_Context: %s %s. TR_Baglam: %s %s.",
-					j.Title, j.TitleTR, j.Year, j.Director, j.Genres, j.Keywords, j.Cast,
+					j.Title, j.TitleTR,
+					j.VoteAvg, j.VoteAvg, j.Year,
+					j.VoteAvg, j.Year,
+					j.Director, j.Genres, j.Keywords, j.Cast,
 					j.Tagline, j.Overview, j.TaglineTR, j.OverviewTR,
 				)
 
@@ -105,7 +114,7 @@ func main() {
 				embJSON, _ := json.Marshal(emb)
 				_, err = db.Exec("UPDATE movies SET embedding = $1 WHERE id = $2", string(embJSON), j.ID)
 				if err == nil {
-					fmt.Printf("Vektör Kaydedildi: %d\n", j.ID)
+					fmt.Printf("Vektör Kaydedildi: %d | %s | Puan: %.1f\n", j.ID, j.Title, j.VoteAvg)
 				}
 			}
 		}()
@@ -114,15 +123,19 @@ func main() {
 	for rows.Next() {
 		var j MovieJob
 		var t, ttr, tg, tgtr, ov, ovtr, dir, rd, gn, kw, cs sql.NullString
-		if err := rows.Scan(&j.ID, &t, &ttr, &tg, &tgtr, &ov, &ovtr, &dir, &rd, &gn, &kw, &cs); err != nil {
+		var vavg sql.NullFloat64 // Null kontrolü için
+
+		if err := rows.Scan(&j.ID, &t, &ttr, &tg, &tgtr, &ov, &ovtr, &dir, &rd, &vavg, &gn, &kw, &cs); err != nil {
 			continue
 		}
+
 		j.Title, j.TitleTR, j.Tagline, j.TaglineTR = t.String, ttr.String, tg.String, tgtr.String
 		j.Overview, j.OverviewTR, j.Director = ov.String, ovtr.String, dir.String
 		j.Year = "N/A"
 		if rd.Valid && len(rd.String) >= 4 {
 			j.Year = rd.String[:4]
 		}
+		j.VoteAvg = vavg.Float64
 		j.Genres, j.Keywords, j.Cast = gn.String, kw.String, cs.String
 		jobs <- j
 	}
@@ -146,11 +159,11 @@ func getEmbedding(input string, client *http.Client) ([]float32, error) {
 			fmt.Println(err)
 		}
 	}(resp.Body)
+
 	var res struct {
 		Embeddings [][]float32 `json:"embeddings"`
 	}
-	err = json.NewDecoder(resp.Body).Decode(&res)
-	if err != nil {
+	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
 		return nil, err
 	}
 	return res.Embeddings[0], nil

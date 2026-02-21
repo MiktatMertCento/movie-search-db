@@ -65,5 +65,55 @@ services:
       backend:
         condition: service_started
 
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: movie-cloudflared
+    restart: always
+    environment:
+      - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
+    command: tunnel run
+    depends_on:
+      - frontend
+
+  updater:
+    image: golang:1.26-alpine
+    container_name: movie-updater
+    working_dir: /app
+    volumes:
+      - .:/app
+    environment:
+      - DB_HOST=db
+      - DB_PORT=5432
+      - DB_USER=root
+      - DB_PASSWORD=randompassword*2026.0
+      - DB_NAME=movie_ai
+      - DB_SSLMODE=disable
+      - TMDB_API_KEY=e5aff83cba4c85311d5a39c070e5178a
+    depends_on:
+      db:
+        condition: service_healthy
+    # Bu komut updater script'ini çalıştırır ve işi bitince konteyner durur
+    entrypoint: [ "go", "run", "data-updater/updater.go" ]
+
+  embedder:
+    image: golang:1.26-alpine
+    container_name: movie-embedder
+    working_dir: /app
+    volumes:
+      - .:/app
+    environment:
+      - DB_HOST=db
+      - DB_PORT=5432
+      - DB_USER=root
+      - DB_PASSWORD=randompassword*2026.0
+      - DB_NAME=movie_ai
+      - DB_SSLMODE=disable
+      - TMDB_API_KEY=e5aff83cba4c85311d5a39c070e5178a
+    depends_on:
+      db:
+        condition: service_healthy
+    # Bu komut updater script'ini çalıştırır ve işi bitince konteyner durur
+    entrypoint: [ "go", "run", "embed/embedder.go" ]
+
 volumes:
   postgres_data:

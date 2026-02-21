@@ -54,7 +54,7 @@ func main() {
 	query := `
 		SELECT id, tmdb_id FROM movies 
 		WHERE tmdb_id IS NOT NULL 
-		AND (overview_tr IS NULL OR poster_path IS NULL) 
+		AND embedding IS NULL 
 		ORDER BY popularity DESC`
 
 	rows, err := db.Query(query)

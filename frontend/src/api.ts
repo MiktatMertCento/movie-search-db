@@ -2,7 +2,7 @@ import axios from 'axios';
 import type {Movie} from './types/schema.ts';
 
 const api = axios.create({
-    baseURL: 'http://localhost:8080/api',
+    baseURL: 'https://searchapi.miktatmert.dev/api',
 });
 
 export const fetchMovies = async (query: string): Promise<Movie[]> => {
