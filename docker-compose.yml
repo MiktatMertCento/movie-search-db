@@ -6,9 +6,9 @@ services:
     ports:
       - "5432:5432"
     environment:
-      - POSTGRES_DB=movie_ai
-      - POSTGRES_USER=root
-      - POSTGRES_PASSWORD=randompassword*2026.0
+      - POSTGRES_DB=${DB_NAME}
+      - POSTGRES_USER=${DB_USER}
+      - POSTGRES_PASSWORD=${DB_PASSWORD}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -24,14 +24,14 @@ services:
     volumes:
       - .:/app
     environment:
-      - DB_HOST=db
-      - DB_PORT=5432
-      - DB_USER=root
-      - DB_PASSWORD=randompassword*2026.0
-      - DB_NAME=movie_ai
-      - DB_SSLMODE=disable
-      - OLLAMA_BASE_URL=http://host.docker.internal:11434
-      - TMDB_API_KEY=e5aff83cba4c85311d5a39c070e5178a
+      - DB_HOST=${DB_HOST}
+      - DB_PORT=${DB_PORT}
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_NAME=${DB_NAME}
+      - DB_SSLMODE=${DB_SSLMODE}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL}
+      - TMDB_API_KEY=${TMDB_API_KEY}
     depends_on:
       db:
         condition: service_healthy
@@ -47,11 +47,12 @@ services:
       setup:
         condition: service_completed_successfully
     environment:
-      - DB_HOST=db
-      - DB_PORT=5432
-      - DB_USER=root
-      - DB_PASSWORD=randompassword*2026.0
-      - DB_NAME=movie_ai
+      - DB_HOST=${DB_HOST}
+      - DB_PORT=${DB_PORT}
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_NAME=${DB_NAME}
+      - DB_SSLMODE=${DB_SSLMODE}
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
@@ -82,13 +83,14 @@ services:
     volumes:
       - .:/app
     environment:
-      - DB_HOST=db
-      - DB_PORT=5432
-      - DB_USER=root
-      - DB_PASSWORD=randompassword*2026.0
-      - DB_NAME=movie_ai
-      - DB_SSLMODE=disable
-      - TMDB_API_KEY=e5aff83cba4c85311d5a39c070e5178a
+      - DB_HOST=${DB_HOST}
+      - DB_PORT=${DB_PORT}
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_NAME=${DB_NAME}
+      - DB_SSLMODE=${DB_SSLMODE}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL}
+      - TMDB_API_KEY=${TMDB_API_KEY}
     depends_on:
       db:
         condition: service_healthy
@@ -102,13 +104,14 @@ services:
     volumes:
       - .:/app
     environment:
-      - DB_HOST=db
-      - DB_PORT=5432
-      - DB_USER=root
-      - DB_PASSWORD=randompassword*2026.0
-      - DB_NAME=movie_ai
-      - DB_SSLMODE=disable
-      - TMDB_API_KEY=e5aff83cba4c85311d5a39c070e5178a
+      - DB_HOST=${DB_HOST}
+      - DB_PORT=${DB_PORT}
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_NAME=${DB_NAME}
+      - DB_SSLMODE=${DB_SSLMODE}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL}
+      - TMDB_API_KEY=${TMDB_API_KEY}
     depends_on:
       db:
         condition: service_healthy
