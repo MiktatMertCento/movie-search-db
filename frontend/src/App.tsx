@@ -5,6 +5,7 @@ import { useQuery } from '@tanstack/react-query';
 import Lenis from 'lenis';
 import { Search, Loader2, Sparkles, PlayCircle, Globe } from 'lucide-react';
 import { AnimatePresence, motion } from 'framer-motion';
+import { useGoogleReCaptcha } from 'react-google-recaptcha-v3';
 
 import { searchSchema, type SearchFormData } from './types/schema.ts';
 import { MovieCard } from './components/MovieCard';
@@ -36,10 +37,21 @@ export default function App() {
         resolver: zodResolver(searchSchema),
     });
 
+    const { executeRecaptcha } = useGoogleReCaptcha();
+
+    const fetchMoviesWithCaptcha = async (query: string) => {
+        if (!executeRecaptcha) {
+            console.warn('ReCAPTCHA is not quite ready yet.');
+            return [];
+        }
+        const token = await executeRecaptcha('search_movies');
+        return fetchMovies(query, token);
+    };
+
     const { data: results, isFetching, isFetched } = useQuery({
         queryKey: ['movies', activeQuery],
-        queryFn: () => fetchMovies(activeQuery),
-        enabled: activeQuery.length > 0,
+        queryFn: () => fetchMoviesWithCaptcha(activeQuery),
+        enabled: activeQuery.length > 0 && !!executeRecaptcha,
         staleTime: 1000 * 60 * 5,
     });
 

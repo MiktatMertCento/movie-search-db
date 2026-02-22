@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -16,21 +17,46 @@ import (
 )
 
 const (
-	WorkerCount = 20
-	// language=tr-TR hem TR metinleri hem de TR posteri (varsa) getirir.
-	TMDBURL = "https://api.themoviedb.org/3/movie/%d?api_key=%s&language=tr-TR"
+	WorkerCount = 15
+	TMDBURL     = "https://api.themoviedb.org/3/movie/%d?api_key=%s&language=tr-TR&append_to_response=credits,keywords"
 )
 
 type TMDBFullResponse struct {
-	Title      string  `json:"title"`
-	Overview   string  `json:"overview"`
-	Tagline    string  `json:"tagline"`
-	PosterPath *string `json:"poster_path"`
+	Title            string  `json:"title"`
+	Overview         string  `json:"overview"`
+	Tagline          string  `json:"tagline"`
+	PosterPath       *string `json:"poster_path"`
+	ReleaseDate      string  `json:"release_date"`
+	Popularity       float64 `json:"popularity"`
+	VoteAverage      float64 `json:"vote_average"`
+	VoteCount        int     `json:"vote_count"`
+	OriginalLanguage string  `json:"original_language"`
+	Genres           []struct {
+		ID   int    `json:"id"`
+		Name string `json:"name"`
+	} `json:"genres"`
+	Keywords struct {
+		Keywords []struct {
+			ID   int    `json:"id"`
+			Name string `json:"name"`
+		} `json:"keywords"`
+	} `json:"keywords"`
+	Credits struct {
+		Cast []struct {
+			Name      string `json:"name"`
+			Character string `json:"character"`
+			Order     int    `json:"order"`
+		} `json:"cast"`
+		Crew []struct {
+			Name string `json:"name"`
+			Job  string `json:"job"`
+		} `json:"crew"`
+	} `json:"credits"`
 }
 
 func init() {
 	if err := godotenv.Load(); err != nil {
-		log.Println(".env dosyası bulunamadı, sistem değişkenleri kullanılacak.")
+		log.Fatal(".env yuklenemedi")
 	}
 }
 
@@ -50,14 +76,14 @@ func main() {
 		}
 	}(db)
 
-	// Hem posteri eksik olanları hem de TR verisi olmayanları hedefliyoruz
-	query := `
-		SELECT id, tmdb_id FROM movies 
-		WHERE tmdb_id IS NOT NULL 
-		AND embedding IS NULL 
-		ORDER BY popularity DESC`
+	db.SetMaxOpenConns(WorkerCount + 5)
+	db.SetMaxIdleConns(WorkerCount)
 
-	rows, err := db.Query(query)
+	if err := prepareDatabase(db); err != nil {
+		log.Fatalf("DB Hazirlik Hatasi: %v", err)
+	}
+
+	rows, err := db.Query("SELECT id, tmdb_id FROM movies WHERE tmdb_id IS NOT NULL ORDER BY popularity DESC")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -71,29 +97,41 @@ func main() {
 	jobs := make(chan [2]int, 100)
 	var wg sync.WaitGroup
 
-	// Worker'ları başlat
 	for i := 0; i < WorkerCount; i++ {
 		wg.Add(1)
 		go worker(db, jobs, &wg)
 	}
 
-	// İşleri kanala gönder
+	rowCount := 0
 	for rows.Next() {
 		var id, tmdbID int
 		if err := rows.Scan(&id, &tmdbID); err != nil {
 			continue
 		}
 		jobs <- [2]int{id, tmdbID}
+		rowCount++
 	}
 
+	fmt.Printf("%d film için güncelleme işlemi başlatıldı...\n", rowCount)
 	close(jobs)
 	wg.Wait()
-	fmt.Println("Tüm veriler (TR Metin + Poster) başarıyla güncellendi.")
+	fmt.Println("\nSenkronizasyon tamamlandı.")
+}
+
+func prepareDatabase(db *sql.DB) error {
+	query := `
+	ALTER TABLE movies ADD COLUMN IF NOT EXISTS genres JSONB;
+	ALTER TABLE movies ADD COLUMN IF NOT EXISTS keywords JSONB;
+	ALTER TABLE movies ADD COLUMN IF NOT EXISTS cast_list JSONB;
+	ALTER TABLE movies ADD COLUMN IF NOT EXISTS director TEXT;
+	`
+	_, err := db.Exec(query)
+	return err
 }
 
 func worker(db *sql.DB, jobs <-chan [2]int, wg *sync.WaitGroup) {
 	defer wg.Done()
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := &http.Client{Timeout: 15 * time.Second}
 	apiKey := os.Getenv("TMDB_API_KEY")
 
 	for job := range jobs {
@@ -101,30 +139,57 @@ func worker(db *sql.DB, jobs <-chan [2]int, wg *sync.WaitGroup) {
 
 		data, err := fetchTMDBData(client, tmdbID, apiKey)
 		if err != nil {
-			log.Printf("ID %d Hatası: %v", tmdbID, err)
+			log.Printf("[Hata] TMDB ID %d: %v", tmdbID, err)
 			continue
 		}
 
-		// Tek sorguda tüm alanları güncelliyoruz.
-		// COALESCE ile poster_path eğer API'den boş gelirse eskisini koruyoruz.
-		updateQuery := `
-			UPDATE movies 
-			SET title_tr = $1, 
-			    overview_tr = $2, 
-			    tagline_tr = $3, 
-			    poster_path = COALESCE($4, poster_path)
-			WHERE id = $5`
-
-		_, err = db.Exec(updateQuery, data.Title, data.Overview, data.Tagline, data.PosterPath, dbID)
-		if err != nil {
-			log.Printf("DB Update Hatası (ID %d): %v", dbID, err)
+		if err := performUpdate(db, dbID, data); err != nil {
+			log.Printf("[Hata] DB Update ID %d: %v", dbID, err)
 		} else {
-			fmt.Printf("Film %d güncellendi: %s (Metin + Poster)\n", dbID, data.Title)
+			fmt.Printf("[OK] %s guncellendi.\n", data.Title)
 		}
 
-		// API limitlerine takılmamak için kısa bir bekleme
 		time.Sleep(40 * time.Millisecond)
 	}
+}
+
+func performUpdate(db *sql.DB, dbID int, data *TMDBFullResponse) error {
+	var directors []string
+	for _, member := range data.Credits.Crew {
+		if member.Job == "Director" {
+			directors = append(directors, member.Name)
+		}
+	}
+
+	genresJSON, _ := json.Marshal(data.Genres)
+	keywordsJSON, _ := json.Marshal(data.Keywords.Keywords)
+	castJSON, _ := json.Marshal(data.Credits.Cast)
+
+	query := `
+		UPDATE movies 
+		SET title_tr = $1, 
+		    overview_tr = $2, 
+		    tagline_tr = $3, 
+		    poster_path = COALESCE($4, poster_path),
+		    director = $5,
+		    genres = $6,
+		    keywords = $7,
+		    cast_list = $8,
+		    release_date = NULLIF($9, '')::DATE,
+		    popularity = $10,
+		    vote_average = $11,
+		    vote_count = $12,
+		    original_language = $13
+		WHERE id = $14`
+
+	_, err := db.Exec(query,
+		data.Title, data.Overview, data.Tagline, data.PosterPath,
+		strings.Join(directors, ", "),
+		genresJSON, keywordsJSON, castJSON,
+		data.ReleaseDate, data.Popularity, data.VoteAverage, data.VoteCount,
+		data.OriginalLanguage, dbID,
+	)
+	return err
 }
 
 func fetchTMDBData(client *http.Client, tmdbID int, apiKey string) (*TMDBFullResponse, error) {
@@ -141,7 +206,7 @@ func fetchTMDBData(client *http.Client, tmdbID int, apiKey string) (*TMDBFullRes
 	}(resp.Body)
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("TMDB API Hatası: %d", resp.StatusCode)
+		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 
 	var res TMDBFullResponse

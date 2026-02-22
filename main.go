@@ -5,8 +5,10 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"time"
 
@@ -17,7 +19,8 @@ import (
 )
 
 type SearchRequest struct {
-	Query string `json:"query"`
+	Query        string `json:"query"`
+	CaptchaToken string `json:"captchaToken"`
 }
 
 type MovieResponse struct {
@@ -30,6 +33,11 @@ type MovieResponse struct {
 	Vote   float64 `json:"Vote"`
 	Sim    float64 `json:"Sim"`
 	Score  float64 `json:"Score"`
+}
+
+type RecaptchaResponse struct {
+	Success bool    `json:"success"`
+	Score   float64 `json:"score"`
 }
 
 var db *sql.DB
@@ -50,15 +58,22 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer func() {
-		if err := db.Close(); err != nil {
+	defer func(db *sql.DB) {
+		err := db.Close()
+		if err != nil {
 			fmt.Println(err)
 		}
-	}()
+	}(db)
+
+	db.SetMaxOpenConns(25)
+	db.SetMaxIdleConns(5)
+	db.SetConnMaxLifetime(time.Minute * 5)
 
 	app := fiber.New(fiber.Config{
 		DisableStartupMessage: false,
+		ReadTimeout:           10 * time.Second,
 	})
+
 	app.Use(cors.New())
 
 	app.Post("/api/search", handleSearch)
@@ -69,43 +84,71 @@ func main() {
 func handleSearch(c *fiber.Ctx) error {
 	var req SearchRequest
 	if err := c.BodyParser(&req); err != nil {
-		return c.Status(400).JSON(fiber.Map{"error": "geçersiz istek"})
+		return c.Status(400).JSON(fiber.Map{"error": "invalid_request"})
+	}
+
+	if req.CaptchaToken == "" {
+		return c.Status(400).JSON(fiber.Map{"error": "captcha_required"})
 	}
 
 	if req.Query == "" {
-		return c.Status(400).JSON(fiber.Map{"error": "sorgu boş olamaz"})
+		return c.Status(400).JSON(fiber.Map{"error": "query_required"})
+	}
+
+	valid, err := verifyRecaptcha(req.CaptchaToken)
+	if err != nil || !valid {
+		return c.Status(403).JSON(fiber.Map{"error": "bot_detected"})
 	}
 
 	embedding, err := getEmbedding(req.Query)
 	if err != nil {
-		return c.Status(500).JSON(fiber.Map{"error": "AI servisi hatası"})
+		return c.Status(500).JSON(fiber.Map{"error": "embedding_failed"})
 	}
 
 	vectorJSON, _ := json.Marshal(embedding)
 
-	query := `
-		SELECT id, tmdb_id, title, tagline, overview, poster_path, vote_average,
-		       (1 - (embedding <=> $1)) as sim,
-		       (((1 - (embedding <=> $1)) * 0.85) + ((vote_average / 10) * 0.10) + (LOG(GREATEST(popularity, 1)) / 10 * 0.05)) as score
-		FROM movies
-		WHERE embedding IS NOT NULL 
-		  AND vote_count > 10
-		  AND (1 - (embedding <=> $1)) > 0.35
-		ORDER BY score DESC
-		LIMIT 12;
-	`
+	const query = `WITH MatchData AS (
+    SELECT 
+        id, 
+        tmdb_id, 
+        COALESCE(NULLIF(TRIM(title_tr), ''), title) AS title,
+        COALESCE(NULLIF(TRIM(tagline_tr), ''), tagline) AS tagline,
+        COALESCE(NULLIF(TRIM(overview_tr), ''), overview) AS overview,
+        poster_path, 
+        vote_average,
+        popularity,
+        (1 - (embedding <=> $1)) AS sim
+    FROM movies
+    WHERE embedding IS NOT NULL 
+      AND vote_count > 10
+)
+SELECT 
+    id, 
+    tmdb_id, 
+    title, 
+    tagline, 
+    overview, 
+    poster_path, 
+    vote_average,
+    sim,
+    ((sim * 0.85) + ((vote_average / 10.0) * 0.10) + (LOG(GREATEST(popularity, 1.0)) / 10.0 * 0.05)) AS score
+FROM MatchData
+WHERE sim > 0.35
+ORDER BY score DESC
+LIMIT 12;`
 
 	rows, err := db.Query(query, string(vectorJSON))
 	if err != nil {
-		return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		return c.Status(500).JSON(fiber.Map{"error": "database_error"})
 	}
-	defer func() {
-		if err := rows.Close(); err != nil {
+	defer func(rows *sql.Rows) {
+		err := rows.Close()
+		if err != nil {
 			fmt.Println(err)
 		}
-	}()
+	}(rows)
 
-	var results []MovieResponse
+	results := make([]MovieResponse, 0)
 	for rows.Next() {
 		var m MovieResponse
 		var t, tg, ov, p sql.NullString
@@ -120,35 +163,60 @@ func handleSearch(c *fiber.Ctx) error {
 	}
 
 	if len(results) == 0 {
-		return c.Status(404).JSON(fiber.Map{
-			"message": "aradığınız kriterlere uygun sonuç bulunamadı",
-			"results": []interface{}{},
-		})
+		return c.Status(404).JSON(fiber.Map{"message": "no_results", "results": []MovieResponse{}})
 	}
 
 	return c.JSON(results)
 }
 
+func verifyRecaptcha(token string) (bool, error) {
+	secret := os.Getenv("RECAPTCHA_PRIVATE_KEY")
+	data := url.Values{
+		"secret":   {secret},
+		"response": {token},
+	}
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.PostForm("https://www.google.com/recaptcha/api/siteverify", data)
+	if err != nil {
+		return false, err
+	}
+	defer func(Body io.ReadCloser) {
+		err := Body.Close()
+		if err != nil {
+			fmt.Println(err)
+		}
+	}(resp.Body)
+
+	var res RecaptchaResponse
+	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+		return false, err
+	}
+
+	return res.Success && res.Score >= 0.5, nil
+}
+
 func getEmbedding(text string) ([]float32, error) {
-	url := fmt.Sprintf("%s/api/embed", os.Getenv("OLLAMA_BASE_URL"))
+	ollamaUrl := fmt.Sprintf("%s/api/embed", os.Getenv("OLLAMA_BASE_URL"))
 	reqBody, _ := json.Marshal(map[string]string{
 		"model": "bge-m3",
 		"input": text,
 	})
 
-	client := &http.Client{Timeout: 20 * time.Second}
-	resp, err := client.Post(url, "application/json", bytes.NewBuffer(reqBody))
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Post(ollamaUrl, "application/json", bytes.NewBuffer(reqBody))
 	if err != nil {
 		return nil, err
 	}
-	defer func() {
-		if err := resp.Body.Close(); err != nil {
+	defer func(Body io.ReadCloser) {
+		err := Body.Close()
+		if err != nil {
 			fmt.Println(err)
 		}
-	}()
+	}(resp.Body)
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("ollama hatası: %d", resp.StatusCode)
+		return nil, fmt.Errorf("ollama_status_%d", resp.StatusCode)
 	}
 
 	var res struct {
@@ -159,7 +227,7 @@ func getEmbedding(text string) ([]float32, error) {
 	}
 
 	if len(res.Embeddings) == 0 {
-		return nil, fmt.Errorf("embedding üretilemedi")
+		return nil, fmt.Errorf("empty_embedding")
 	}
 
 	return res.Embeddings[0], nil
